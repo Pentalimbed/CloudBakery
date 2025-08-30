@@ -1045,3 +1045,5 @@ dkms.conf
 *.dis
 
 .xmake/*
+
+package/*

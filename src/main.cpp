@@ -199,7 +199,7 @@ int main(int argc, char* argv[])
         argparse::ArgumentParser program("cloud-bakery");
         program.add_argument("-i", "--input-dir")
             .help("Input directory of all dds files. "
-                  "Valid dds file names are \"(direction_x)_(direction_y)_(direction_z)_(any_identifier).dds\".")
+                  "Valid dds file names are \"(any_identifier)_(direction_x)_(direction_y)_(direction_z).dds\".")
             .default_value("./input"s);
         program.add_argument("-o", "--output-dir")
             .help("Output directory of baked SH. "
@@ -267,7 +267,7 @@ int main(int argc, char* argv[])
 
     // Read textures
     {
-        const RE2 filename_re{R"(^([+-]?(?:\d*\.\d+|\d+\.\d*|\d+))_([+-]?(?:\d*\.\d+|\d+\.\d*|\d+))_([+-]?(?:\d*\.\d+|\d+\.\d*|\d+))_(.*).dds$)"};
+        const RE2 filename_re{R"(^(.*)_([+-]?(?:\d*\.\d+|\d+\.\d*|\d+))_([+-]?(?:\d*\.\d+|\d+\.\d*|\d+))_([+-]?(?:\d*\.\d+|\d+\.\d*|\d+)).dds$)"};
         for (auto const& dir_entry : std::filesystem::directory_iterator{args.in_dir}) {
             auto filename_path = dir_entry.path().filename();
             auto filename      = filename_path.string();
@@ -280,7 +280,7 @@ int main(int argc, char* argv[])
             std::string  identifier;
             InputTexture tex;
             if (!RE2::FullMatch(filename, filename_re,
-                                &tex.light_direction.x, &tex.light_direction.y, &tex.light_direction.z, &identifier)) {
+                                &identifier, &tex.light_direction.x, &tex.light_direction.y, &tex.light_direction.z)) {
                 spdlog::warn("\t{} does not match the naming pattern.", filename);
                 continue;
             }

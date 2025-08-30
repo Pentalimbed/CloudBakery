@@ -26,3 +26,5 @@ target("cloud-bakery")
     add_files("src/**.cpp")
     -- add_headerfiles("src/**.h")
     add_includedirs("src")
+
+    add_installfiles("src/shaders/*", {prefixdir = "bin/shaders"}) 
