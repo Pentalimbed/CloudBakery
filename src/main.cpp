@@ -383,22 +383,24 @@ int main(int argc, char* argv[])
             continue;
         }
 
+        for (auto& tex_sh_coeff : d3d.tex_sh_coeffs) {
+            tex_sh_coeff    = initTex(d3d.device.get(), width, height, DXGI_FORMAT_R32G32B32A32_FLOAT);
+            float values[4] = {0, 0, 0, 0};
+            d3d.context->ClearUnorderedAccessViewFloat(tex_sh_coeff.uav.get(), values);
+        }
         d3d.context->CSSetShader(d3d.bake_cs.get(), nullptr, 0);
+
+        BakeCBData cb_data{
+            .weight = 1.F / static_cast<float>(entries.size()),
+        };
 
         // Dispatch
         for (auto const& entry : entries) {
-            BakeCBData cb_data{
-                .light_dir = entry.light_direction,
-                .weight    = 1.F / static_cast<float>(entries.size()),
-            };
+            cb_data.light_dir = entry.light_direction,
             d3d.context->UpdateSubresource(d3d.common_buffer.get(), 0, nullptr, &cb_data, 0, 0);
 
             auto* srv = entry.srv.get();
             d3d.context->CSSetShaderResources(0, 1, &srv);
-
-            d3d.tex_sh_coeffs[0] = initTex(d3d.device.get(), width, height, DXGI_FORMAT_R32G32B32A32_FLOAT);
-            d3d.tex_sh_coeffs[1] = initTex(d3d.device.get(), width, height, DXGI_FORMAT_R32G32B32A32_FLOAT);
-            d3d.tex_sh_coeffs[2] = initTex(d3d.device.get(), width, height, DXGI_FORMAT_R32G32B32A32_FLOAT);
 
             auto uavs = std::array{d3d.tex_sh_coeffs[0].uav.get(), d3d.tex_sh_coeffs[1].uav.get(), d3d.tex_sh_coeffs[2].uav.get()};
             d3d.context->CSSetUnorderedAccessViews(0, uavs.size(), uavs.data(), nullptr);
@@ -436,9 +438,8 @@ int main(int argc, char* argv[])
             d3d.context->CSSetShaderResources(0, srvs.size(), srvs.data());
 
             // save
-            const auto& last_light_dir = entries.back().light_direction;
             DX::ThrowIfFailed(saveTextureToDDS(d3d.device.get(), d3d.context.get(), valid_tex.tex.get(),
-                                               args.validation_dir / std::format("{}_{:.2f}_{:.2f}_{:.2f}_re.dds", identifier, last_light_dir.x, last_light_dir.y, last_light_dir.z), false));
+                                               args.validation_dir / std::format("{}_{:.2f}_{:.2f}_{:.2f}_re.dds", identifier, cb_data.light_dir.x, cb_data.light_dir.y, cb_data.light_dir.z), false));
         }
 
         spdlog::info("\tDone");

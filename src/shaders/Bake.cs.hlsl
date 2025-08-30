@@ -6,10 +6,10 @@ cbuffer CBData : register(b0)
     float weight;
 };
 
-Texture2D<float> TexRadiance;
-RWTexture2D<float3> RWTexSHCoeff1;
-RWTexture2D<float3> RWTexSHCoeff2;
-RWTexture2D<float3> RWTexSHCoeff3;
+Texture2D<float> TexRadiance : register(t0);
+RWTexture2D<float3> RWTexSHCoeff1 : register(u0);
+RWTexture2D<float3> RWTexSHCoeff2 : register(u1);
+RWTexture2D<float3> RWTexSHCoeff3 : register(u2);
 
 [numthreads(8, 8, 1)] 
 void main(uint2 tid : SV_DispatchThreadID)
