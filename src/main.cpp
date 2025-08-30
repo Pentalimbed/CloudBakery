@@ -56,6 +56,7 @@ inline void ThrowIfFailed(HRESULT hr)
 struct Arguments {
     std::filesystem::path in_dir;
     std::filesystem::path out_dir;
+    std::filesystem::path validation_dir;
 };
 
 struct Texture {
@@ -83,8 +84,9 @@ struct D3dObjs {
 
     std::unordered_map<std::string, std::vector<InputTexture>> tex_inputs;
     std::array<Texture, 3>                                     tex_sh_coeffs = {};
-    com_ptr<ID3D11Buffer>                                      bake_cb       = nullptr;
+    com_ptr<ID3D11Buffer>                                      common_buffer = nullptr;
     com_ptr<ID3D11ComputeShader>                               bake_cs       = nullptr;
+    com_ptr<ID3D11ComputeShader>                               validation_cs = nullptr;
 };
 
 namespace {
@@ -113,7 +115,7 @@ ID3D11ComputeShader* compileShader(ID3D11Device* device, const std::filesystem::
     return reg_shader;
 }
 
-Texture initOutTex(ID3D11Device* device, uint32_t width, uint32_t height)
+Texture initTex(ID3D11Device* device, uint32_t width, uint32_t height, DXGI_FORMAT format)
 {
     Texture retval;
 
@@ -122,7 +124,7 @@ Texture initOutTex(ID3D11Device* device, uint32_t width, uint32_t height)
         .Height         = height,
         .MipLevels      = 1,
         .ArraySize      = 1,
-        .Format         = DXGI_FORMAT_R16G16B16A16_FLOAT,
+        .Format         = format,
         .SampleDesc     = {.Count = 1, .Quality = 0},
         .Usage          = D3D11_USAGE_DEFAULT,
         .BindFlags      = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_UNORDERED_ACCESS,
@@ -145,7 +147,7 @@ Texture initOutTex(ID3D11Device* device, uint32_t width, uint32_t height)
     return retval;
 }
 
-HRESULT saveTextureToDDS(ID3D11Device* device, ID3D11DeviceContext* context, ID3D11Texture2D* tex, const std::filesystem::path& out_path)
+HRESULT saveTextureToDDS(ID3D11Device* device, ID3D11DeviceContext* context, ID3D11Texture2D* tex, const std::filesystem::path& out_path, bool compressed)
 {
     // Capture texture into a ScratchImage
     DirectX::ScratchImage image;
@@ -156,26 +158,30 @@ HRESULT saveTextureToDDS(ID3D11Device* device, ID3D11DeviceContext* context, ID3
     }
 
     // Compress to BC6H format
-    DirectX::ScratchImage compressed;
-    hr = DirectX::Compress(
-        image.GetImages(),
-        image.GetImageCount(),
-        image.GetMetadata(),
-        DXGI_FORMAT_BC6H_SF16, // BC6H format
-        DirectX::TEX_COMPRESS_DEFAULT,
-        1.0F,
-        compressed);
+    DirectX::ScratchImage compressed_image;
+    if (compressed) {
+        hr = DirectX::Compress(
+            image.GetImages(),
+            image.GetImageCount(),
+            image.GetMetadata(),
+            DXGI_FORMAT_BC6H_SF16, // BC6H format
+            DirectX::TEX_COMPRESS_DEFAULT,
+            1.0F,
+            compressed_image);
 
-    if (FAILED(hr)) {
-        spdlog::error("Failed to compress texture to BC6H");
-        return hr;
+        if (FAILED(hr)) {
+            spdlog::error("Failed to compress texture to BC6H");
+            return hr;
+        }
     }
+
+    auto& target_image = compressed ? compressed_image : image;
 
     // Save to DDS file
     hr = DirectX::SaveToDDSFile(
-        compressed.GetImages(),
-        compressed.GetImageCount(),
-        compressed.GetMetadata(),
+        target_image.GetImages(),
+        target_image.GetImageCount(),
+        target_image.GetMetadata(),
         DirectX::DDS_FLAGS_NONE,
         out_path.wstring().c_str());
 
@@ -198,13 +204,17 @@ int main(int argc, char* argv[])
     {
         argparse::ArgumentParser program("cloud-bakery");
         program.add_argument("-i", "--input-dir")
-            .help("Input directory of all dds files. "
+            .help("Input directory of all dds files.\n"
                   "Valid dds file names are \"(any_identifier)_(direction_x)_(direction_y)_(direction_z).dds\".")
             .default_value("./input"s);
         program.add_argument("-o", "--output-dir")
-            .help("Output directory of baked SH. "
+            .help("Output directory of baked SH.\n"
                   "The output dds will be named as \"(identifier)_sh(0/1/2).dds\" where the identifier matches the input.")
             .default_value("./output"s);
+        program.add_argument("-v", "--validation-dir")
+            .help("Output directory of reconstructed images.\n"
+                  "Specifying this to generate a reconstructed image of the first image of the set")
+            .default_value(std::string{});
 
         try {
             program.parse_args(argc, argv);
@@ -215,21 +225,31 @@ int main(int argc, char* argv[])
             return E_INVALIDARG;
         }
 
-        args.in_dir  = program.get("-i");
-        args.out_dir = program.get("-o");
+        args.in_dir         = program.get("-i");
+        args.out_dir        = program.get("-o");
+        args.validation_dir = program.get("-v");
 
         if (!(std::filesystem::exists(args.in_dir) && std::filesystem::is_directory(args.in_dir))) {
             spdlog::error("Invalid input directory: {}", args.in_dir.string());
             return E_FAIL;
         }
 
-        if (std::filesystem::exists(args.out_dir) && !std::filesystem::is_directory(args.in_dir)) {
+        if (std::filesystem::exists(args.out_dir) && !std::filesystem::is_directory(args.out_dir)) {
             spdlog::error("Output directory exists and is not a folder: {}", args.in_dir.string());
+            return E_FAIL;
+        }
+
+        if (std::filesystem::exists(args.validation_dir) && !std::filesystem::is_directory(args.validation_dir)) {
+            spdlog::error("Validation directory exists and is not a folder: {}", args.in_dir.string());
             return E_FAIL;
         }
 
         if (!std::filesystem::exists(args.out_dir))
             std::filesystem::create_directory(args.out_dir);
+
+
+        if (!args.validation_dir.empty() && !std::filesystem::exists(args.validation_dir))
+            std::filesystem::create_directory(args.validation_dir);
     }
 
     // Initialize d3d device & context
@@ -322,7 +342,7 @@ int main(int argc, char* argv[])
             .BindFlags      = D3D11_BIND_CONSTANT_BUFFER,
             .CPUAccessFlags = 0,
         };
-        auto hr = d3d.device->CreateBuffer(&desc, nullptr, d3d.bake_cb.put());
+        auto hr = d3d.device->CreateBuffer(&desc, nullptr, d3d.common_buffer.put());
         if (FAILED(hr)) {
             spdlog::warn("Failed to create constant buffer");
             return hr;
@@ -336,9 +356,16 @@ int main(int argc, char* argv[])
         d3d.bake_cs.attach(base_cs);
     }
 
+    {
+        auto* base_cs = compileShader(d3d.device.get(), "./shaders/Validation.cs.hlsl", "main");
+        if (base_cs == nullptr)
+            return E_FAIL;
+        d3d.validation_cs.attach(base_cs);
+    }
+
     // Common setup
     {
-        auto* cb = d3d.bake_cb.get();
+        auto* cb = d3d.common_buffer.get();
         d3d.context->CSSetConstantBuffers(0, 1, &cb);
         d3d.context->CSSetShader(d3d.bake_cs.get(), nullptr, 0);
     }
@@ -356,29 +383,63 @@ int main(int argc, char* argv[])
             continue;
         }
 
+        d3d.context->CSSetShader(d3d.bake_cs.get(), nullptr, 0);
+
         // Dispatch
         for (auto const& entry : entries) {
             BakeCBData cb_data{
                 .light_dir = entry.light_direction,
                 .weight    = 1.F / static_cast<float>(entries.size()),
             };
-            d3d.context->UpdateSubresource(d3d.bake_cb.get(), 0, nullptr, &cb_data, 0, 0);
+            d3d.context->UpdateSubresource(d3d.common_buffer.get(), 0, nullptr, &cb_data, 0, 0);
 
-            d3d.tex_sh_coeffs[0] = initOutTex(d3d.device.get(), width, height);
-            d3d.tex_sh_coeffs[1] = initOutTex(d3d.device.get(), width, height);
-            d3d.tex_sh_coeffs[2] = initOutTex(d3d.device.get(), width, height);
+            auto* srv = entry.srv.get();
+            d3d.context->CSSetShaderResources(0, 1, &srv);
+
+            d3d.tex_sh_coeffs[0] = initTex(d3d.device.get(), width, height, DXGI_FORMAT_R32G32B32A32_FLOAT);
+            d3d.tex_sh_coeffs[1] = initTex(d3d.device.get(), width, height, DXGI_FORMAT_R32G32B32A32_FLOAT);
+            d3d.tex_sh_coeffs[2] = initTex(d3d.device.get(), width, height, DXGI_FORMAT_R32G32B32A32_FLOAT);
 
             auto uavs = std::array{d3d.tex_sh_coeffs[0].uav.get(), d3d.tex_sh_coeffs[1].uav.get(), d3d.tex_sh_coeffs[2].uav.get()};
             d3d.context->CSSetUnorderedAccessViews(0, uavs.size(), uavs.data(), nullptr);
 
             d3d.context->Dispatch((width + 7) / 8, (height + 7) / 8, 1);
+
+            // clear
+            srv = nullptr;
+            d3d.context->CSSetShaderResources(0, 1, &srv);
+            uavs.fill(nullptr);
+            d3d.context->CSSetUnorderedAccessViews(0, uavs.size(), uavs.data(), nullptr);
         }
 
         // Save textures
         for (size_t i = 0; i < d3d.tex_sh_coeffs.size(); i++)
-            DX::ThrowIfFailed(saveTextureToDDS(d3d.device.get(), d3d.context.get(), d3d.tex_sh_coeffs[i].tex.get(), args.out_dir / std::format("{}_sh{}.dds", identifier, i)));
+            DX::ThrowIfFailed(saveTextureToDDS(d3d.device.get(), d3d.context.get(), d3d.tex_sh_coeffs[i].tex.get(),
+                                               args.out_dir / std::format("{}_sh{}.dds", identifier, i), true));
 
         // Validation
+        if (!args.validation_dir.empty()) {
+            auto  valid_tex = initTex(d3d.device.get(), width, height, DXGI_FORMAT_R32_FLOAT);
+            auto* uav       = valid_tex.uav.get();
+            d3d.context->CSSetUnorderedAccessViews(0, 1, &uav, nullptr);
+
+            auto srvs = std::array{d3d.tex_sh_coeffs[0].srv.get(), d3d.tex_sh_coeffs[1].srv.get(), d3d.tex_sh_coeffs[2].srv.get()};
+            d3d.context->CSSetShaderResources(0, srvs.size(), srvs.data());
+
+            d3d.context->CSSetShader(d3d.validation_cs.get(), nullptr, 0);
+            d3d.context->Dispatch((width + 7) / 8, (height + 7) / 8, 1);
+
+            // clear
+            uav = nullptr;
+            d3d.context->CSSetUnorderedAccessViews(0, 1, &uav, nullptr);
+            srvs.fill(nullptr);
+            d3d.context->CSSetShaderResources(0, srvs.size(), srvs.data());
+
+            // save
+            const auto& last_light_dir = entries.back().light_direction;
+            DX::ThrowIfFailed(saveTextureToDDS(d3d.device.get(), d3d.context.get(), valid_tex.tex.get(),
+                                               args.validation_dir / std::format("{}_{:.2f}_{:.2f}_{:.2f}_re.dds", identifier, last_light_dir.x, last_light_dir.y, last_light_dir.z), false));
+        }
 
         spdlog::info("\tDone");
     }
