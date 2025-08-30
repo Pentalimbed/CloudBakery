@@ -1,0 +1,79 @@
+{
+    __meta__ = {
+        version = "1.0"
+    },
+    ["windows|x64"] = {
+        ["abseil#31fecfc4"] = {
+            repo = {
+                branch = "master",
+                commit = "25ac1178428185fbf899cac717af98fe85d26d15",
+                url = "https://gitee.com/tboox/xmake-repo.git"
+            },
+            version = "20250512.1"
+        },
+        ["argparse#31fecfc4"] = {
+            repo = {
+                branch = "master",
+                commit = "25ac1178428185fbf899cac717af98fe85d26d15",
+                url = "https://gitee.com/tboox/xmake-repo.git"
+            },
+            version = "3.2"
+        },
+        ["cmake#31fecfc4"] = {
+            repo = {
+                branch = "master",
+                commit = "25ac1178428185fbf899cac717af98fe85d26d15",
+                url = "https://gitee.com/tboox/xmake-repo.git"
+            },
+            version = "4.0.2"
+        },
+        ["directxmath#31fecfc4"] = {
+            repo = {
+                branch = "master",
+                commit = "1c4a5226d098031c7980196c162975781e1627cd",
+                url = "https://gitee.com/tboox/xmake-repo.git"
+            },
+            version = "2024.02"
+        },
+        ["directxtex#31fecfc4"] = {
+            repo = {
+                branch = "master",
+                commit = "25ac1178428185fbf899cac717af98fe85d26d15",
+                url = "https://gitee.com/tboox/xmake-repo.git"
+            },
+            version = "2023.06"
+        },
+        ["directxtk#31fecfc4"] = {
+            repo = {
+                branch = "master",
+                commit = "1c4a5226d098031c7980196c162975781e1627cd",
+                url = "https://gitee.com/tboox/xmake-repo.git"
+            },
+            version = "24.2.0"
+        },
+        ["ninja#31fecfc4"] = {
+            repo = {
+                branch = "master",
+                commit = "25ac1178428185fbf899cac717af98fe85d26d15",
+                url = "https://gitee.com/tboox/xmake-repo.git"
+            },
+            version = "1.13.1"
+        },
+        ["re2#31fecfc4"] = {
+            repo = {
+                branch = "master",
+                commit = "25ac1178428185fbf899cac717af98fe85d26d15",
+                url = "https://gitee.com/tboox/xmake-repo.git"
+            },
+            version = "2025.07.17"
+        },
+        ["spdlog#31fecfc4"] = {
+            repo = {
+                branch = "master",
+                commit = "25ac1178428185fbf899cac717af98fe85d26d15",
+                url = "https://gitee.com/tboox/xmake-repo.git"
+            },
+            version = "v1.15.3"
+        }
+    }
+}
