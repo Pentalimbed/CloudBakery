@@ -29,5 +29,6 @@ void main(uint2 tid : SV_DispatchThreadID)
     sh.C[7] = sh2.y;
     sh.C[8] = sh2.z;
 
-    RWTexOut[tid.xy] = SH::Evaluate(sh, light_dir);
+    float color = SH::Evaluate(sh, light_dir);
+    RWTexOut[tid.xy] = color;
 }

@@ -66,10 +66,15 @@ struct Texture {
 };
 
 struct InputTexture {
-    DirectX::XMFLOAT3                 light_direction = {1.F, 0.F, 0.F};
+    DirectX::XMFLOAT3                 light_direction = {1.F, 0.F, 0.F}; // note: unused for transmittance
     uint32_t                          width           = 0;
     uint32_t                          height          = 0;
     com_ptr<ID3D11ShaderResourceView> srv             = nullptr;
+};
+
+struct InputTexSet {
+    InputTexture              tr; // transmittance
+    std::vector<InputTexture> colors;
 };
 
 struct BakeCBData {
@@ -82,11 +87,11 @@ struct D3dObjs {
     com_ptr<ID3D11Device1>        device  = nullptr;
     com_ptr<ID3D11DeviceContext1> context = nullptr;
 
-    std::unordered_map<std::string, std::vector<InputTexture>> tex_inputs;
-    std::array<Texture, 3>                                     tex_sh_coeffs = {};
-    com_ptr<ID3D11Buffer>                                      common_buffer = nullptr;
-    com_ptr<ID3D11ComputeShader>                               bake_cs       = nullptr;
-    com_ptr<ID3D11ComputeShader>                               validation_cs = nullptr;
+    std::unordered_map<std::string, InputTexSet> tex_inputs;
+    std::array<Texture, 3>                       tex_sh_coeffs = {};
+    com_ptr<ID3D11Buffer>                        common_buffer = nullptr;
+    com_ptr<ID3D11ComputeShader>                 bake_cs       = nullptr;
+    com_ptr<ID3D11ComputeShader>                 validation_cs = nullptr;
 };
 
 namespace {
@@ -287,7 +292,8 @@ int main(int argc, char* argv[])
 
     // Read textures
     {
-        const RE2 filename_re{R"(^(.*)_([+-]?(?:\d*\.\d+|\d+\.\d*|\d+))_([+-]?(?:\d*\.\d+|\d+\.\d*|\d+))_([+-]?(?:\d*\.\d+|\d+\.\d*|\d+)).dds$)"};
+        const RE2 tr_file_re{R"(^(.*)_tr.dds$)"};
+        const RE2 color_file_re{R"(^(.*)_([+-]?(?:\d*\.\d+|\d+\.\d*|\d+))_([+-]?(?:\d*\.\d+|\d+\.\d*|\d+))_([+-]?(?:\d*\.\d+|\d+\.\d*|\d+)).dds$)"};
         for (auto const& dir_entry : std::filesystem::directory_iterator{args.in_dir}) {
             auto filename_path = dir_entry.path().filename();
             auto filename      = filename_path.string();
@@ -299,13 +305,12 @@ int main(int argc, char* argv[])
 
             std::string  identifier;
             InputTexture tex;
-            if (!RE2::FullMatch(filename, filename_re,
-                                &identifier, &tex.light_direction.x, &tex.light_direction.y, &tex.light_direction.z)) {
+
+            bool is_tr = RE2::FullMatch(filename, tr_file_re, &identifier);
+            if (!is_tr && !RE2::FullMatch(filename, color_file_re, &identifier, &tex.light_direction.x, &tex.light_direction.y, &tex.light_direction.z)) {
                 spdlog::warn("\t{} does not match the naming pattern.", filename);
                 continue;
             }
-
-            DirectX::XMStoreFloat3(&tex.light_direction, DirectX::XMVector3Normalize(DirectX::XMLoadFloat3(&tex.light_direction)));
 
             ID3D11Resource* temp_rsrc = nullptr;
             auto            hr        = DirectX::CreateDDSTextureFromFile(d3d.device.get(), dir_entry.path().wstring().c_str(), &temp_rsrc, tex.srv.put());
@@ -326,9 +331,17 @@ int main(int argc, char* argv[])
             tex.width  = tex_desc.Width;
             tex.height = tex_desc.Height;
 
-            if (!d3d.tex_inputs.contains(identifier))
-                d3d.tex_inputs[identifier] = {};
-            d3d.tex_inputs[identifier].push_back(tex);
+            if (is_tr) {
+                if (!d3d.tex_inputs.contains(identifier))
+                    d3d.tex_inputs[identifier] = {};
+                d3d.tex_inputs[identifier].tr = tex;
+            } else {
+                DirectX::XMStoreFloat3(&tex.light_direction, DirectX::XMVector3Normalize(DirectX::XMLoadFloat3(&tex.light_direction)));
+
+                if (!d3d.tex_inputs.contains(identifier))
+                    d3d.tex_inputs[identifier] = {};
+                d3d.tex_inputs[identifier].colors.push_back(tex);
+            }
 
             spdlog::info("\tLoaded {} ({} x {})", filename, tex.width, tex.height);
         }
@@ -371,15 +384,20 @@ int main(int argc, char* argv[])
     }
 
     // Process
-    for (auto const& [identifier, entries] : d3d.tex_inputs) {
-        spdlog::info("Processing {} ...", identifier);
+    for (auto const& [identifier, tex_set] : d3d.tex_inputs) {
+        spdlog::info("Processing texture set {} ...", identifier);
 
-        const auto width  = entries[0].width;
-        const auto height = entries[0].height;
+        if (tex_set.tr.srv == nullptr) {
+            spdlog::warn("\tTexture set {} has no transmittance texture ({}_tr.dds). Skipping the whole set", identifier, identifier);
+            continue;
+        }
+
+        const auto width  = tex_set.tr.width;
+        const auto height = tex_set.tr.height;
 
         // Checking equal dimensions
-        if (std::ranges::any_of(entries, [width, height](auto const& tex) { return (tex.width != width) || (tex.height != height); })) {
-            spdlog::warn("\tTextures ended with {} have more than two sizes. Skipping the whole set", identifier);
+        if (std::ranges::any_of(tex_set.colors, [width, height](auto const& tex) { return (tex.width != width) || (tex.height != height); })) {
+            spdlog::warn("\tTexture set {} has more than two sizes. Skipping the whole set", identifier);
             continue;
         }
 
@@ -391,11 +409,11 @@ int main(int argc, char* argv[])
         d3d.context->CSSetShader(d3d.bake_cs.get(), nullptr, 0);
 
         BakeCBData cb_data{
-            .weight = 1.F / static_cast<float>(entries.size()),
+            .weight = 1.F / static_cast<float>(tex_set.colors.size()),
         };
 
         // Dispatch
-        for (auto const& entry : entries) {
+        for (auto const& entry : tex_set.colors) {
             cb_data.light_dir = entry.light_direction,
             d3d.context->UpdateSubresource(d3d.common_buffer.get(), 0, nullptr, &cb_data, 0, 0);
 
