@@ -1,9 +1,12 @@
 #include <array>
+#include <cassert>
 #include <cstdint>
+#include <expected>
 #include <filesystem>
 #include <ranges>
+#include <stdexcept>
+#include <string>
 #include <string_view>
-#include <unordered_map>
 #include <vector>
 
 #include <argparse/argparse.hpp>
@@ -73,13 +76,16 @@ struct InputTexture {
 };
 
 struct InputTexSet {
-    InputTexture              tr; // transmittance
+    uint32_t                  face; // see Common.hlsli
+    InputTexture              tr;
     std::vector<InputTexture> colors;
 };
 
 struct BakeCBData {
     DirectX::XMFLOAT3 light_dir;
     float             weight;
+    uint32_t          face;
+    DirectX::XMFLOAT3 _pad;
 };
 static_assert(sizeof(BakeCBData) % 16 == 0);
 
@@ -95,6 +101,18 @@ struct D3dObjs {
 };
 
 namespace {
+uint32_t faceStrToUint(const std::string& str)
+{
+    static const std::map<std::string, uint32_t> KEYMAP = {
+        {"+x"s, 0},
+        {"-x"s, 1},
+        {"+y"s, 2},
+        {"-y"s, 3},
+        {"+z"s, 4},
+    };
+    return KEYMAP.at(str);
+}
+
 ID3D11ComputeShader* compileShader(ID3D11Device* device, const std::filesystem::path& path, const char* entry_point)
 {
     spdlog::info("Compiling {} :{} ...", path.string(), entry_point);
@@ -210,11 +228,11 @@ int main(int argc, char* argv[])
         argparse::ArgumentParser program("cloud-bakery");
         program.add_argument("-i", "--input-dir")
             .help("Input directory of all dds files.\n"
-                  "Valid dds file names are \"(any_identifier)_(direction_x)_(direction_y)_(direction_z).dds\".")
+                  "Valid dds file names are \"(any_identifier)_(+/-)(x/y/z)_(direction_x)_(direction_y)_(direction_z).dds\".")
             .default_value("./input"s);
         program.add_argument("-o", "--output-dir")
             .help("Output directory of baked SH.\n"
-                  "The output dds will be named as \"(identifier)_sh(0/1/2).dds\" where the identifier matches the input.")
+                  "The output dds will be named as \"(identifier)_(+/-)(x/y/z)_sh(0/1/2).dds\" where the identifier matches the input.")
             .default_value("./output"s);
         program.add_argument("-v", "--validation-dir")
             .help("Output directory of reconstructed images.\n"
@@ -251,7 +269,6 @@ int main(int argc, char* argv[])
 
         if (!std::filesystem::exists(args.out_dir))
             std::filesystem::create_directory(args.out_dir);
-
 
         if (!args.validation_dir.empty() && !std::filesystem::exists(args.validation_dir))
             std::filesystem::create_directory(args.validation_dir);
@@ -292,8 +309,8 @@ int main(int argc, char* argv[])
 
     // Read textures
     {
-        const RE2 tr_file_re{R"(^(.*)_tr.dds$)"};
-        const RE2 color_file_re{R"(^(.*)_([+-]?(?:\d*\.\d+|\d+\.\d*|\d+))_([+-]?(?:\d*\.\d+|\d+\.\d*|\d+))_([+-]?(?:\d*\.\d+|\d+\.\d*|\d+)).dds$)"};
+        const RE2 tr_file_re{R"(^(.*)_([+-][xyz])_tr.dds$)"};
+        const RE2 color_file_re{R"(^(.*)_([+-][xyz])_([+-]?(?:\d*\.\d+|\d+\.\d*|\d+))_([+-]?(?:\d*\.\d+|\d+\.\d*|\d+))_([+-]?(?:\d*\.\d+|\d+\.\d*|\d+)).dds$)"};
         for (auto const& dir_entry : std::filesystem::directory_iterator{args.in_dir}) {
             auto filename_path = dir_entry.path().filename();
             auto filename      = filename_path.string();
@@ -304,10 +321,11 @@ int main(int argc, char* argv[])
             spdlog::info("Reading {} ...", filename);
 
             std::string  identifier;
+            std::string  face_str;
             InputTexture tex;
 
-            bool is_tr = RE2::FullMatch(filename, tr_file_re, &identifier);
-            if (!is_tr && !RE2::FullMatch(filename, color_file_re, &identifier, &tex.light_direction.x, &tex.light_direction.y, &tex.light_direction.z)) {
+            bool is_tr = RE2::FullMatch(filename, tr_file_re, &identifier, &face_str);
+            if (!is_tr && !RE2::FullMatch(filename, color_file_re, &identifier, &face_str, &tex.light_direction.x, &tex.light_direction.y, &tex.light_direction.z)) {
                 spdlog::warn("\t{} does not match the naming pattern.", filename);
                 continue;
             }
@@ -331,17 +349,17 @@ int main(int argc, char* argv[])
             tex.width  = tex_desc.Width;
             tex.height = tex_desc.Height;
 
+            std::string key = std::format("{}_{}", identifier, face_str);
+            if (!d3d.tex_inputs.contains(key))
+                d3d.tex_inputs[key] = {};
+
             if (is_tr) {
-                if (!d3d.tex_inputs.contains(identifier))
-                    d3d.tex_inputs[identifier] = {};
-                d3d.tex_inputs[identifier].tr = tex;
+                d3d.tex_inputs[key].tr = tex;
             } else {
                 DirectX::XMStoreFloat3(&tex.light_direction, DirectX::XMVector3Normalize(DirectX::XMLoadFloat3(&tex.light_direction)));
-
-                if (!d3d.tex_inputs.contains(identifier))
-                    d3d.tex_inputs[identifier] = {};
-                d3d.tex_inputs[identifier].colors.push_back(tex);
+                d3d.tex_inputs[key].colors.push_back(tex);
             }
+            d3d.tex_inputs[key].face = faceStrToUint(face_str);
 
             spdlog::info("\tLoaded {} ({} x {})", filename, tex.width, tex.height);
         }
@@ -384,11 +402,11 @@ int main(int argc, char* argv[])
     }
 
     // Process
-    for (auto const& [identifier, tex_set] : d3d.tex_inputs) {
-        spdlog::info("Processing texture set {} ...", identifier);
+    for (auto const& [key, tex_set] : d3d.tex_inputs) {
+        spdlog::info("Processing texture set {} ...", key);
 
         if (tex_set.tr.srv == nullptr) {
-            spdlog::warn("\tTexture set {} has no transmittance texture ({}_tr.dds). Skipping the whole set", identifier, identifier);
+            spdlog::warn("\tTexture set {} has no transmittance texture ({}_tr.dds). Skipping the whole set", key, key);
             continue;
         }
 
@@ -397,7 +415,7 @@ int main(int argc, char* argv[])
 
         // Checking equal dimensions
         if (std::ranges::any_of(tex_set.colors, [width, height](auto const& tex) { return (tex.width != width) || (tex.height != height); })) {
-            spdlog::warn("\tTexture set {} has more than two sizes. Skipping the whole set", identifier);
+            spdlog::warn("\tTexture set {} has more than two sizes. Skipping the whole set", key);
             continue;
         }
 
@@ -410,6 +428,7 @@ int main(int argc, char* argv[])
 
         BakeCBData cb_data{
             .weight = 1.F / static_cast<float>(tex_set.colors.size()),
+            .face   = tex_set.face,
         };
 
         // Dispatch
@@ -417,8 +436,11 @@ int main(int argc, char* argv[])
             cb_data.light_dir = entry.light_direction,
             d3d.context->UpdateSubresource(d3d.common_buffer.get(), 0, nullptr, &cb_data, 0, 0);
 
-            auto* srv = entry.srv.get();
-            d3d.context->CSSetShaderResources(0, 1, &srv);
+            auto srvs = std::array{
+                entry.srv.get(),
+                tex_set.tr.srv.get(),
+            };
+            d3d.context->CSSetShaderResources(0, srvs.size(), srvs.data());
 
             auto uavs = std::array{d3d.tex_sh_coeffs[0].uav.get(), d3d.tex_sh_coeffs[1].uav.get(), d3d.tex_sh_coeffs[2].uav.get()};
             d3d.context->CSSetUnorderedAccessViews(0, uavs.size(), uavs.data(), nullptr);
@@ -426,8 +448,8 @@ int main(int argc, char* argv[])
             d3d.context->Dispatch((width + 7) / 8, (height + 7) / 8, 1);
 
             // clear
-            srv = nullptr;
-            d3d.context->CSSetShaderResources(0, 1, &srv);
+            srvs.fill(nullptr);
+            d3d.context->CSSetShaderResources(0, srvs.size(), srvs.data());
             uavs.fill(nullptr);
             d3d.context->CSSetUnorderedAccessViews(0, uavs.size(), uavs.data(), nullptr);
         }
@@ -435,7 +457,7 @@ int main(int argc, char* argv[])
         // Save textures
         for (size_t i = 0; i < d3d.tex_sh_coeffs.size(); i++)
             DX::ThrowIfFailed(saveTextureToDDS(d3d.device.get(), d3d.context.get(), d3d.tex_sh_coeffs[i].tex.get(),
-                                               args.out_dir / std::format("{}_sh{}.dds", identifier, i), true));
+                                               args.out_dir / std::format("{}_sh{}.dds", key, i), true));
 
         // Validation
         if (!args.validation_dir.empty()) {
@@ -443,7 +465,12 @@ int main(int argc, char* argv[])
             auto* uav       = valid_tex.uav.get();
             d3d.context->CSSetUnorderedAccessViews(0, 1, &uav, nullptr);
 
-            auto srvs = std::array{d3d.tex_sh_coeffs[0].srv.get(), d3d.tex_sh_coeffs[1].srv.get(), d3d.tex_sh_coeffs[2].srv.get()};
+            auto srvs = std::array{
+                d3d.tex_sh_coeffs[0].srv.get(),
+                d3d.tex_sh_coeffs[1].srv.get(),
+                d3d.tex_sh_coeffs[2].srv.get(),
+                tex_set.tr.srv.get(),
+            };
             d3d.context->CSSetShaderResources(0, srvs.size(), srvs.data());
 
             d3d.context->CSSetShader(d3d.validation_cs.get(), nullptr, 0);
@@ -457,7 +484,7 @@ int main(int argc, char* argv[])
 
             // save
             DX::ThrowIfFailed(saveTextureToDDS(d3d.device.get(), d3d.context.get(), valid_tex.tex.get(),
-                                               args.validation_dir / std::format("{}_{:.2f}_{:.2f}_{:.2f}_re.dds", identifier, cb_data.light_dir.x, cb_data.light_dir.y, cb_data.light_dir.z), false));
+                                               args.validation_dir / std::format("{}_{:.2f}_{:.2f}_{:.2f}_re.dds", key, cb_data.light_dir.x, cb_data.light_dir.y, cb_data.light_dir.z), false));
         }
 
         spdlog::info("\tDone");

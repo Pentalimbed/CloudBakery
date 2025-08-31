@@ -1,14 +1,18 @@
+#include "Common.hlsli"
 #include "SH_Lite.hlsli"
 
 cbuffer CBData : register(b0)
 {
     float3 light_dir;
     float weight;
+    uint face;
+    float3 _pad;
 };
 
 Texture2D<float3> TexSHCoeff1 : register(t0);
 Texture2D<float3> TexSHCoeff2 : register(t1);
 Texture2D<float3> TexSHCoeff3 : register(t2);
+Texture2D<float> TexTr : register(t3);
 RWTexture2D<float> RWTexOut : register(u0);
 
 [numthreads(8, 8, 1)] 
@@ -30,5 +34,14 @@ void main(uint2 tid : SV_DispatchThreadID)
     sh.C[8] = sh2.z;
 
     float color = SH::Evaluate(sh, light_dir);
+
+    uint2 dims;
+    TexTr.GetDimensions(dims.x, dims.y);
+    float2 uv = (tid.xy + .5) / dims;
+    float3 view_dir = viewDirFromFace(face, uv);
+    float u = dot(-view_dir, light_dir);
+    float phase = Phase::MsHeuristic(u, TexTr[tid.xy]);
+    color *= phase;
+
     RWTexOut[tid.xy] = color;
 }
