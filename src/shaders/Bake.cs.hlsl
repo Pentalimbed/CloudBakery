@@ -27,7 +27,7 @@ void main(uint2 tid : SV_DispatchThreadID)
 
     color /= phase;
 
-    SH::L2 sh = SH::ProjectOntoL2(light_dir, color * weight);
+    SH::L2 sh = SH::ProjectOntoL2(light_dir, color * weight * 4 * 3.1415926);
 
     RWTexSHCoeffs[uint3(tid.xy, 0)] += float3(sh.C[0], sh.C[1], sh.C[2]);
     RWTexSHCoeffs[uint3(tid.xy, 1)] += float3(sh.C[3], sh.C[4], sh.C[5]);
