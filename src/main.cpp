@@ -62,7 +62,7 @@ struct Arguments {
     std::filesystem::path validation_dir;
 };
 
-struct Texture {
+struct ShTexture {
     winrt::com_ptr<ID3D11Texture2D>    tex = nullptr;
     com_ptr<ID3D11ShaderResourceView>  srv = nullptr;
     com_ptr<ID3D11UnorderedAccessView> uav = nullptr;
@@ -94,7 +94,7 @@ struct D3dObjs {
     com_ptr<ID3D11DeviceContext1> context = nullptr;
 
     std::unordered_map<std::string, InputTexSet> tex_inputs;
-    std::array<Texture, 3>                       tex_sh_coeffs = {};
+    ShTexture                                    tex_sh_coeffs = {};
     com_ptr<ID3D11Buffer>                        common_buffer = nullptr;
     com_ptr<ID3D11ComputeShader>                 bake_cs       = nullptr;
     com_ptr<ID3D11ComputeShader>                 validation_cs = nullptr;
@@ -138,30 +138,42 @@ ID3D11ComputeShader* compileShader(ID3D11Device* device, const std::filesystem::
     return reg_shader;
 }
 
-Texture initTex(ID3D11Device* device, uint32_t width, uint32_t height, DXGI_FORMAT format)
+template <bool is_sh>
+ShTexture initTex(ID3D11Device* device, uint32_t width, uint32_t height)
 {
-    Texture retval;
+    ShTexture retval;
 
     D3D11_TEXTURE2D_DESC tex_desc = {
         .Width          = width,
         .Height         = height,
         .MipLevels      = 1,
-        .ArraySize      = 1,
-        .Format         = format,
+        .ArraySize      = is_sh ? 3 : 1,
+        .Format         = is_sh ? DXGI_FORMAT_R32G32B32A32_FLOAT : DXGI_FORMAT_R32_FLOAT,
         .SampleDesc     = {.Count = 1, .Quality = 0},
         .Usage          = D3D11_USAGE_DEFAULT,
         .BindFlags      = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_UNORDERED_ACCESS,
         .CPUAccessFlags = 0,
-        .MiscFlags      = 0};
+        .MiscFlags      = 0,
+    };
+
     D3D11_SHADER_RESOURCE_VIEW_DESC srv_desc = {
         .Format        = tex_desc.Format,
-        .ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2D,
-        .Texture2D     = {.MostDetailedMip = 0, .MipLevels = 1}};
+        .ViewDimension = is_sh ? D3D11_SRV_DIMENSION_TEXTURE2DARRAY : D3D11_SRV_DIMENSION_TEXTURE2D,
+    };
+    if constexpr (is_sh)
+        srv_desc.Texture2DArray = {.MostDetailedMip = 0, .MipLevels = 1, .FirstArraySlice = 0, .ArraySize = 3};
+    else
+        srv_desc.Texture2D = {.MostDetailedMip = 0, .MipLevels = 1};
+
     D3D11_UNORDERED_ACCESS_VIEW_DESC uav_desc = {
         .Format        = tex_desc.Format,
-        .ViewDimension = D3D11_UAV_DIMENSION_TEXTURE2D,
-        .Texture2D     = {.MipSlice = 0}};
-
+        .ViewDimension = is_sh ? D3D11_UAV_DIMENSION_TEXTURE2DARRAY : D3D11_UAV_DIMENSION_TEXTURE2D,
+        .Texture2D     = {.MipSlice = 0},
+    };
+    if constexpr (is_sh)
+        uav_desc.Texture2DArray = {.MipSlice = 0, .FirstArraySlice = 0, .ArraySize = 3};
+    else
+        uav_desc.Texture2D = {.MipSlice = 0};
 
     DX::ThrowIfFailed(device->CreateTexture2D(&tex_desc, nullptr, retval.tex.put()));
     DX::ThrowIfFailed(device->CreateShaderResourceView(retval.tex.get(), &srv_desc, retval.srv.put()));
@@ -232,7 +244,7 @@ int main(int argc, char* argv[])
             .default_value("./input"s);
         program.add_argument("-o", "--output-dir")
             .help("Output directory of baked SH.\n"
-                  "The output dds will be named as \"(identifier)_(+/-)(x/y/z)_sh(0/1/2).dds\" where the identifier matches the input.")
+                  "The output dds will be named as \"(identifier)_(+/-)(x/y/z)_sh.dds\" where the identifier matches the input.")
             .default_value("./output"s);
         program.add_argument("-v", "--validation-dir")
             .help("Output directory of reconstructed images.\n"
@@ -403,10 +415,10 @@ int main(int argc, char* argv[])
 
     // Process
     for (auto const& [key, tex_set] : d3d.tex_inputs) {
-        spdlog::info("Processing texture set {} ...", key);
+        spdlog::info("Processing texture set \"{}\" ...", key);
 
         if (tex_set.tr.srv == nullptr) {
-            spdlog::warn("\tTexture set {} has no transmittance texture ({}_tr.dds). Skipping the whole set", key, key);
+            spdlog::warn("\tTexture set \"{}\" has no transmittance texture ({}_tr.dds). Skipping the whole set", key, key);
             continue;
         }
 
@@ -415,15 +427,14 @@ int main(int argc, char* argv[])
 
         // Checking equal dimensions
         if (std::ranges::any_of(tex_set.colors, [width, height](auto const& tex) { return (tex.width != width) || (tex.height != height); })) {
-            spdlog::warn("\tTexture set {} has more than two sizes. Skipping the whole set", key);
+            spdlog::warn("\tTexture set \"{}\" has more than two sizes. Skipping the whole set", key);
             continue;
         }
 
-        for (auto& tex_sh_coeff : d3d.tex_sh_coeffs) {
-            tex_sh_coeff    = initTex(d3d.device.get(), width, height, DXGI_FORMAT_R32G32B32A32_FLOAT);
-            float values[4] = {0, 0, 0, 0};
-            d3d.context->ClearUnorderedAccessViewFloat(tex_sh_coeff.uav.get(), values);
-        }
+        d3d.tex_sh_coeffs = initTex<true>(d3d.device.get(), width, height);
+        float values[4]   = {0, 0, 0, 0};
+        d3d.context->ClearUnorderedAccessViewFloat(d3d.tex_sh_coeffs.uav.get(), values);
+
         d3d.context->CSSetShader(d3d.bake_cs.get(), nullptr, 0);
 
         BakeCBData cb_data{
@@ -442,7 +453,7 @@ int main(int argc, char* argv[])
             };
             d3d.context->CSSetShaderResources(0, srvs.size(), srvs.data());
 
-            auto uavs = std::array{d3d.tex_sh_coeffs[0].uav.get(), d3d.tex_sh_coeffs[1].uav.get(), d3d.tex_sh_coeffs[2].uav.get()};
+            auto uavs = std::array{d3d.tex_sh_coeffs.uav.get()};
             d3d.context->CSSetUnorderedAccessViews(0, uavs.size(), uavs.data(), nullptr);
 
             d3d.context->Dispatch((width + 7) / 8, (height + 7) / 8, 1);
@@ -455,20 +466,17 @@ int main(int argc, char* argv[])
         }
 
         // Save textures
-        for (size_t i = 0; i < d3d.tex_sh_coeffs.size(); i++)
-            DX::ThrowIfFailed(saveTextureToDDS(d3d.device.get(), d3d.context.get(), d3d.tex_sh_coeffs[i].tex.get(),
-                                               args.out_dir / std::format("{}_sh{}.dds", key, i), true));
+        DX::ThrowIfFailed(saveTextureToDDS(d3d.device.get(), d3d.context.get(), d3d.tex_sh_coeffs.tex.get(),
+                                           args.out_dir / std::format("{}_sh.dds", key), true));
 
         // Validation
         if (!args.validation_dir.empty()) {
-            auto  valid_tex = initTex(d3d.device.get(), width, height, DXGI_FORMAT_R32_FLOAT);
+            auto  valid_tex = initTex<false>(d3d.device.get(), width, height);
             auto* uav       = valid_tex.uav.get();
             d3d.context->CSSetUnorderedAccessViews(0, 1, &uav, nullptr);
 
             auto srvs = std::array{
-                d3d.tex_sh_coeffs[0].srv.get(),
-                d3d.tex_sh_coeffs[1].srv.get(),
-                d3d.tex_sh_coeffs[2].srv.get(),
+                d3d.tex_sh_coeffs.srv.get(),
                 tex_set.tr.srv.get(),
             };
             d3d.context->CSSetShaderResources(0, srvs.size(), srvs.data());

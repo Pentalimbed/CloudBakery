@@ -9,18 +9,16 @@ cbuffer CBData : register(b0)
     float3 _pad;
 };
 
-Texture2D<float3> TexSHCoeff1 : register(t0);
-Texture2D<float3> TexSHCoeff2 : register(t1);
-Texture2D<float3> TexSHCoeff3 : register(t2);
-Texture2D<float> TexTr : register(t3);
+Texture2DArray<float3> TexSHCoeffs : register(t0);
+Texture2D<float> TexTr : register(t1);
 RWTexture2D<float> RWTexOut : register(u0);
 
 [numthreads(8, 8, 1)] 
 void main(uint2 tid : SV_DispatchThreadID)
 {
-    float3 sh0 = TexSHCoeff1[tid.xy];
-    float3 sh1 = TexSHCoeff2[tid.xy];
-    float3 sh2 = TexSHCoeff3[tid.xy];
+    float3 sh0 = TexSHCoeffs[uint3(tid.xy, 0)];
+    float3 sh1 = TexSHCoeffs[uint3(tid.xy, 1)];
+    float3 sh2 = TexSHCoeffs[uint3(tid.xy, 2)];
     
     SH::L2 sh;
     sh.C[0] = sh0.x;

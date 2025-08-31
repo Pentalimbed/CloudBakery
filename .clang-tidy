@@ -5,6 +5,7 @@ Checks: >-
   clang-analyzer-*,
   cert-*,
   cppcoreguidelines-*,
+  -cppcoreguidelines-pro-type-union-access,
   misc-*,
   modernize-*,
   -modernize-use-trailing-return-type,
